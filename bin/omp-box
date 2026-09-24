@@ -228,9 +228,11 @@ run_jailed() {
   # handles it to cancel a turn).
   exec "$fj" "${FJ[@]}" -- bash -c '
     trap "" INT
-    "$@" &
-    p=$!
-    wait "$p"; rc=$?
+    # Payload runs in the FOREGROUND: backgrounding it detaches it from the
+    # foreground process group of the terminal, so an interactive TUI gets
+    # SIGHUP / SIGTTIN the moment it touches the pty (observed: omp TUI
+    # paints one frame then dies with 129). trap+kill below still tears down.
+    "$@"; rc=$?
     kill -9 -1 2>/dev/null || true
     for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
       busy=0
