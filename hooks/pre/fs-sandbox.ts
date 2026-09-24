@@ -140,7 +140,10 @@ export default function fsSandbox(omp: HookAPI): void {
             "Deny",
           ]);
           if (choice === `Allow once (this session only) — ${resolved}`) {
-            sessionApproved.add(resolved);
+            // Session set uses the parent dir too, so sibling writes in the
+            // same directory are covered without re-prompting — matching
+            // what "Always allow" would persist.
+            sessionApproved.add(resolved.slice(0, resolved.lastIndexOf("/")) || "/");
             continue;
           }
           if (choice === `Always allow (add ${resolved.slice(0, resolved.lastIndexOf("/")) || "/"} to allowlist)`) {
