@@ -131,22 +131,30 @@ export default function fsSandbox(omp: HookAPI): void {
         if (inAllowlist) continue;
 
         if (ctx.hasUI) {
-          const ok = await ctx.ui.confirm(
-            "fs-sandbox",
-            `Allow ${event.toolName} to write outside the workspace?\n${resolved}`,
-          );
-          if (ok) {
+          // Ask the user HOW to allow: session-only (this omp process, not
+          // persisted — useful for one-off scratch writes) or always (parent
+          // dir appended to the allowlist file, surviving restarts).
+          const choice = await ctx.ui.select("fs-sandbox", [
+            `Allow once (this session only) — ${resolved}`,
+            `Always allow (add ${resolved.slice(0, resolved.lastIndexOf("/")) || "/"} to allowlist)`,
+            "Deny",
+          ]);
+          if (choice === `Allow once (this session only) — ${resolved}`) {
             sessionApproved.add(resolved);
-            // Persist the parent dir as the allowlist prefix: one dialog per
-            // directory, consistent with `omp-box allow <dir>` entries.
+            continue;
+          }
+          if (choice === `Always allow (add ${resolved.slice(0, resolved.lastIndexOf("/")) || "/"} to allowlist)`) {
+            sessionApproved.add(resolved);
             const parent = resolved.slice(0, resolved.lastIndexOf("/")) || "/";
             try {
               appendFileSync(ALLOWLIST_PATH, parent + "\n");
             } catch {
-              // Read-only config (e.g. under the omp-box firejail jail): skip.
+              // Read-only config (e.g. under the omp-box firejail jail): the
+              // approval still holds for this session; persistence skipped.
             }
             continue;
           }
+          // Deny / dismissed falls through to the block below.
         }
 
         return {
