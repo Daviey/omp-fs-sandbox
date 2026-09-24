@@ -10,6 +10,10 @@
 #
 # Usage:
 #   omp-box [omp args...]          jailed omp, run from the workspace directory
+#   omp-box -- --resume            widen-and-continue: after `omp-box allow PATH`,
+#                                  relaunches the jail with the new RW set AND
+#                                  resumes the latest session in this cwd
+#                                  (conversation continuity, no context loss)
 #   omp-box -- [omp args...]       same; use `--` when omp args collide below
 #   omp-box allow PATH             HOST-SIDE escalation: add PATH to the allowlist
 #   omp-box allowlist              print the effective jail configuration
