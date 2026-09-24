@@ -1,6 +1,6 @@
 # omp-fs-sandbox
 
-Filesystem sandbox plugin for [omp](https://github.com/oh-my-pi/oh-my-pi): confines the
+Filesystem sandbox plugin for omp: confines the
 `write`, `edit`, and `ast_edit` tools to the session cwd plus an allowlist of path
 prefixes, with an interactive ask-permission flow that persists approvals.
 
