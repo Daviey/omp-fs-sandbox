@@ -1,0 +1,8 @@
+{
+  "name": "omp-fs-sandbox",
+  "version": "0.1.0",
+  "omp": {
+    "name": "omp-fs-sandbox",
+    "description": "Filesystem sandbox: block write/edit outside cwd + allowlist, ask-to-approve escalation"
+  }
+}

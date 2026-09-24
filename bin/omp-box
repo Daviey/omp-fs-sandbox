@@ -1,0 +1,289 @@
+#!/usr/bin/env bash
+# omp-box — OS-level (firejail mount-namespace) filesystem jail for omp sessions.
+#
+# Launches a whole omp session — agent, bash tool, subagents — inside a firejail
+# sandbox where the ONLY writable paths are the workspace ($PWD) and whatever
+# the allowlist grants. Everything else under $HOME is bind-mounted READ-ONLY
+# at kernel mount level, so a stray `sed -i ~/important.conf`, `rm -rf ~/`,
+# or `tee ~/.ssh/authorized_keys` from the bash tool fails with EROFS no matter
+# which tool or subshell produced it.
+#
+# Usage:
+#   omp-box [omp args...]          jailed omp, run from the workspace directory
+#   omp-box -- [omp args...]       same; use `--` when omp args collide below
+#   omp-box allow PATH             HOST-SIDE escalation: add PATH to the allowlist
+#   omp-box allowlist              print the effective jail configuration
+#   omp-box raw -- CMD [args...]   DEBUG ONLY: run CMD in the exact jail we build
+#
+# The allowlist (~/.config/omp-sandbox/allowlist) is shared with the
+# omp-fs-sandbox hook layer. It is read at LAUNCH time only: inside the jail
+# ~/.config is read-only, so the agent cannot widen its own jail — extending it
+# requires a human running `omp-box allow PATH` in a normal terminal and then
+# restarting the session.
+#
+# This is a filesystem jail ONLY: --noprofile keeps the environment, network,
+# X and dbus untouched (ssh-agent and other /run sockets stay visible, git push
+# over ssh keeps working). See omp-box.md for the threat model.
+set -euo pipefail
+
+SCRIPT_NAME=omp-box
+ALLOWLIST="$HOME/.config/omp-sandbox/allowlist"
+
+usage() {
+  sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'
+}
+
+die()  { printf '%s: error: %s\n' "$SCRIPT_NAME" "$*" >&2; exit 1; }
+warn() { printf '%s: warning: %s\n' "$SCRIPT_NAME" "$*" >&2; }
+note() { printf '%s: %s\n' "$SCRIPT_NAME" "$*" >&2; }
+
+# norm PATH — expand ~, resolve relative paths against $PWD, normalize to an
+# absolute canonical form (symlinks resolved where they exist, no existence check).
+norm() {
+  local p=$1
+  if [[ $p == '~' ]]; then p=$HOME
+  elif [[ $p == '~/'* ]]; then p="$HOME/${p:2}"
+  fi
+  if [[ $p != /* ]]; then p=$PWD/$p; fi
+  realpath -m -- "$p"
+}
+
+# covered_by PATH BASE — true when PATH is BASE itself or lives under BASE.
+covered_by() {
+  local path=$1 base=$2
+  [[ $path == "$base" || $path == "$base"/* ]]
+}
+
+# The always-RW set: the workspace plus omp's own state/cache dirs.
+base_rw_list() {
+  norm "$PWD"
+  norm "$HOME/.omp"
+  norm "$HOME/.cache"
+}
+
+ensure_allowlist() {
+  if [[ ! -f $ALLOWLIST ]]; then
+    mkdir -p -- "$(dirname "$ALLOWLIST")"
+    {
+      echo "# omp sandbox allowlist (shared by the omp-fs-sandbox hook and the omp-box jail): one absolute path prefix per line."
+      echo "# '#' comment lines and blank lines are ignored; ~ is expanded. The session cwd is always allowed."
+      echo "/tmp"
+    } > "$ALLOWLIST"
+    note "created default allowlist at $ALLOWLIST"
+  fi
+}
+
+# Emit each allowlist entry, normalized. Comments/blank lines dropped.
+allowlist_entries() {
+  [[ -f $ALLOWLIST ]] || return 0
+  local line
+  while IFS= read -r line || [[ -n $line ]]; do
+    line=${line#"${line%%[![:space:]]*}"}   # ltrim
+    line=${line%"${line##*[![:space:]]}"}   # rtrim
+    if [[ -z $line || $line == '#'* ]]; then continue; fi
+    norm "$line"
+  done < "$ALLOWLIST"
+}
+
+# Populate the global FJ array with the exact firejail options for this launch.
+# Order matters: --read-only=$HOME first, then every --read-write subpath —
+# firejail applies later bind mounts over earlier ones, so the RW islands win.
+build_firejail_args() {
+  local -a bases=()
+  local b entry covered
+  while IFS= read -r b; do bases+=("$b"); done < <(base_rw_list)
+
+  # --keep-var-tmp stops firejail from mounting an empty tmpfs over /var/tmp,
+  # which would silently shadow any allowlisted bind under it. With the real
+  # /var/tmp visible we deny it by default (--read-only) and let allowlist
+  # entries punch rw holes through, exactly like $HOME.
+  FJ=(--noprofile --keep-var-tmp --read-only="$(norm "$HOME")" --read-only=/var/tmp)
+  for b in "${bases[@]}"; do FJ+=(--read-write="$b"); done
+
+  local -A seen=()
+  while IFS= read -r entry; do
+    [[ -n $entry ]] || continue
+
+    covered=0
+    for b in "${bases[@]}"; do
+      if covered_by "$entry" "$b"; then covered=1; break; fi
+    done
+    if (( covered )); then continue; fi   # already writable via the base set
+
+    if covered_by "$(norm "$HOME")" "$entry"; then
+      warn "allowlist entry '$entry' covers \$HOME — skipped (would defeat the jail)"
+      continue
+    fi
+    if [[ ! -e $entry ]]; then
+      warn "allowlist entry '$entry' does not exist — skipped"
+      continue
+    fi
+    if [[ -n ${seen[$entry]:-} ]]; then continue; fi
+    seen[$entry]=1
+    FJ+=(--read-write="$entry")
+  done < <(allowlist_entries | LC_ALL=C sort -u)
+}
+
+check_launch_dir() {
+  local pwd_norm home_norm
+  pwd_norm=$(norm "$PWD")
+  home_norm=$(norm "$HOME")
+  if [[ $pwd_norm == "$home_norm" ]]; then
+    die "refusing to launch: \$PWD is \$HOME itself — no workspace confinement possible. cd into a project directory first."
+  fi
+}
+
+find_firejail() {
+  local fj
+  fj=$(command -v firejail) || die "firejail not found in PATH (NixOS: enable security.firejail so the setuid wrapper exists)"
+  printf '%s' "$fj"
+}
+
+# omp-box allow PATH — the ONLY way to extend the jail, by design.
+cmd_allow() {
+  local target=$1
+  target=$(norm "$target")
+
+  if covered_by "$(norm "$HOME")" "$target"; then
+    warn "'$target' covers \$HOME — it will be ignored at launch (it would defeat the jail)"
+  fi
+
+  mkdir -p -- "$(dirname "$ALLOWLIST")"
+  ensure_allowlist
+
+  local present=0 prefix entry
+  while IFS= read -r entry; do
+    [[ -n $entry ]] || continue
+    if [[ $entry == "$target" ]]; then present=1; break; fi
+  done < <(allowlist_entries)
+
+  if (( present )); then
+    note "'$target' is already in the allowlist"
+  else
+    for prefix in $(allowlist_entries | LC_ALL=C sort -u); do
+      if [[ $prefix != "$target" ]] && covered_by "$target" "$prefix"; then
+        note "'$target' is already covered by allowlist entry '$prefix' (prefix semantics); appending anyway per explicit request"
+        break
+      fi
+    done
+    printf '%s\n' "$target" >> "$ALLOWLIST"
+    note "added '$target' to $ALLOWLIST (restart the jailed session to pick it up — the allowlist is read at launch time)"
+  fi
+
+  cat "$ALLOWLIST"
+}
+
+# omp-box allowlist — effective config for a launch from the current directory.
+cmd_allowlist() {
+  ensure_allowlist
+  local home_norm pwd_norm
+  home_norm=$(norm "$HOME")
+  pwd_norm=$(norm "$PWD")
+
+  echo "omp-box effective jail configuration (for a launch from this directory):"
+  echo "  workspace (cwd, rw):  $pwd_norm"
+  echo "  always rw:            $home_norm/.omp   (omp session state / auth)"
+  echo "                        $home_norm/.cache (caches)"
+  echo "  read-only base:       $home_norm  (everything else under \$HOME, incl. ~/.config, ~/.ssh, ~/.gnupg)"
+  echo "  allowlist:            $ALLOWLIST"
+
+  local entry status b
+  while IFS= read -r entry; do
+    [[ -n $entry ]] || continue
+    status=""
+    for b in "$pwd_norm" "$home_norm/.omp" "$home_norm/.cache"; do
+      if covered_by "$entry" "$b"; then status="no extra mount needed (covered by $b)"; break; fi
+    done
+    if [[ -z $status ]] && covered_by "$home_norm" "$entry"; then
+      status="SKIPPED at launch: covers \$HOME (would defeat the jail)"
+    fi
+    if [[ -z $status ]] && [[ ! -e $entry ]]; then
+      status="SKIPPED at launch: does not exist"
+    fi
+    [[ -z $status ]] && status="mounted rw at launch"
+    printf '    %s\n        -> %s\n' "$entry" "$status"
+  done < <(allowlist_entries | LC_ALL=C sort -u)
+
+  echo "  unchanged by design:  network, X, dbus, environment, /run sockets (--noprofile; filesystem jail only)"
+}
+
+# Shared launch path: build the jail, exec the payload under it.
+run_jailed() {
+  check_launch_dir
+  mkdir -p -- "$HOME/.omp" "$HOME/.cache"
+  ensure_allowlist
+  build_firejail_args
+  local fj; fj=$(find_firejail)
+  # The payload runs under a tiny supervisor: firejail's parent only exits
+  # when the LAST process in the sandbox namespace exits, and omp deliberately
+  # leaves its local-embeddings workers unref'd and alive — so a naive
+  # `firejail ... -- omp` hangs the terminal forever after omp exits.
+  # When the payload exits we SIGKILL everything left in this PID namespace
+  # (kill -1 skips this shell and the namespace init), then busy-wait until
+  # the namespace is actually empty so OUR exit status is the one firejail
+  # reports (it surfaces the last-reaped child — dying before a SIGKILLed
+  # stray would make the wrapper return 137 instead of omp's code).
+  # Consequence, by design: nothing started inside the jail outlives the
+  # session. SIGINT is ignored here so Ctrl-C reaches omp only (the TUI
+  # handles it to cancel a turn).
+  exec "$fj" "${FJ[@]}" -- bash -c '
+    trap "" INT
+    "$@" &
+    p=$!
+    wait "$p"; rc=$?
+    kill -9 -1 2>/dev/null || true
+    for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+      busy=0
+      for d in /proc/[0-9]*; do
+        case ${d#/proc/} in "$$"|"1") continue ;; esac
+        busy=1; break
+      done
+      [ "$busy" -eq 0 ] && break
+      kill -9 -1 2>/dev/null || true
+      sleep 0.05
+    done
+    exit $rc
+  ' omp-box-jail "$@"
+}
+
+main() {
+  case ${1:-} in
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    allow)
+      [[ $# -ge 2 ]] || die "usage: omp-box allow PATH"
+      cmd_allow "$2"
+      ;;
+    allowlist)
+      cmd_allowlist
+      ;;
+    raw)  # debug passthrough: the exact jail, arbitrary payload (probing only)
+      shift
+      if [[ ${1:-} == '--' ]]; then shift; fi
+      [[ $# -ge 1 ]] || die "usage: omp-box raw -- CMD [args...]"
+      note "raw debug passthrough: launching '$*' in the omp-box jail"
+      run_jailed "$@"
+      ;;
+    --)
+      # After `--`: if the first token names an executable on PATH, run it
+      # jailed (same jail as `raw`); otherwise treat everything as omp args.
+      # `omp-box -- -p "…"` stays an omp launch; `omp-box -- bash -c '…'`
+      # doubles as an enforcement probe without needing `raw`.
+      shift
+      if [[ $# -ge 1 ]] && command -v -- "${1%% *}" >/dev/null 2>&1; then
+        run_jailed "$@"
+      fi
+      run_jailed omp "$@"
+      ;;
+    '')
+      run_jailed omp
+      ;;
+    *)
+      run_jailed omp "$@"
+      ;;
+  esac
+}
+
+main "$@"
