@@ -130,32 +130,56 @@ export default function fsSandbox(omp: HookAPI): void {
           );
         if (inAllowlist) continue;
 
+        const parent = resolved.slice(0, resolved.lastIndexOf("/")) || "/";
+
         if (ctx.hasUI) {
           // Ask the user HOW to allow: session-only (this omp process, not
-          // persisted — useful for one-off scratch writes) or always (parent
-          // dir appended to the allowlist file, surviving restarts).
+          // persisted), always (parent dir appended to the allowlist file,
+          // surviving restarts), or jail-widen (host-side: the user runs
+          // `omp-box allow <parent>` in a normal terminal, then restarts the
+          // jailed session — the mount table is launch-time only, so the
+          // agent can never widen it from inside).
+          const onceLabel = `Allow once (this session only) — ${resolved}`;
+          const alwaysLabel = `Always allow (add ${parent} to allowlist)`;
+          const widenLabel = `Widen jail: run omp-box allow ${parent} host-side, then restart`;
           const choice = await ctx.ui.select("fs-sandbox", [
-            `Allow once (this session only) — ${resolved}`,
-            `Always allow (add ${resolved.slice(0, resolved.lastIndexOf("/")) || "/"} to allowlist)`,
+            onceLabel,
+            alwaysLabel,
+            widenLabel,
             "Deny",
           ]);
-          if (choice === `Allow once (this session only) — ${resolved}`) {
+          if (choice === onceLabel) {
             // Session set uses the parent dir too, so sibling writes in the
             // same directory are covered without re-prompting — matching
             // what "Always allow" would persist.
-            sessionApproved.add(resolved.slice(0, resolved.lastIndexOf("/")) || "/");
+            sessionApproved.add(parent);
             continue;
           }
-          if (choice === `Always allow (add ${resolved.slice(0, resolved.lastIndexOf("/")) || "/"} to allowlist)`) {
-            sessionApproved.add(resolved);
-            const parent = resolved.slice(0, resolved.lastIndexOf("/")) || "/";
+          if (choice === alwaysLabel) {
+            sessionApproved.add(parent);
             try {
               appendFileSync(ALLOWLIST_PATH, parent + "\n");
             } catch {
               // Read-only config (e.g. under the omp-box firejail jail): the
-              // approval still holds for this session; persistence skipped.
+              // approval still holds for this session; persistence skipped —
+              // the user should have picked the widen option instead.
             }
             continue;
+          }
+          if (choice === widenLabel) {
+            // Persistent widening requires a human on the host: the jail's
+            // mount table is built at launch, and ~/.config is read-only
+            // inside, so the agent cannot write its own allowlist here.
+            return {
+              block: true,
+              reason:
+                `fs-sandbox: jail widening approved for ${parent}, but it ` +
+                `must be applied host-side. The user should run, in a ` +
+                `NORMAL terminal (outside omp-box):\n` +
+                `  omp-box allow ${parent}\n` +
+                `then restart this jailed session — the new mount set is ` +
+                `picked up at launch.`,
+            };
           }
           // Deny / dismissed falls through to the block below.
         }
