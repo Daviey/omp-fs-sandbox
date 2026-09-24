@@ -124,10 +124,9 @@ export default function fsSandbox(omp: HookAPI): void {
 
         const inCwd = resolved === cwd || resolved.startsWith(cwd + "/");
         const inAllowlist =
-          inCwd ||
           sessionApproved.has(resolved) ||
           allowPrefixes.some(
-            (prefix) => resolved === prefix || resolved.startsWith(prefix + "/") || resolved.startsWith(prefix),
+            (prefix) => resolved === prefix || resolved.startsWith(prefix + "/"),
           );
         if (inAllowlist) continue;
 
@@ -138,8 +137,11 @@ export default function fsSandbox(omp: HookAPI): void {
           );
           if (ok) {
             sessionApproved.add(resolved);
+            // Persist the parent dir as the allowlist prefix: one dialog per
+            // directory, consistent with `omp-box allow <dir>` entries.
+            const parent = resolved.slice(0, resolved.lastIndexOf("/")) || "/";
             try {
-              appendFileSync(ALLOWLIST_PATH, resolved + "\n");
+              appendFileSync(ALLOWLIST_PATH, parent + "\n");
             } catch {
               // Read-only config (e.g. under the omp-box firejail jail): skip.
             }

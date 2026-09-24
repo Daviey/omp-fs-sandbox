@@ -1,6 +1,6 @@
 # omp-plugins
 
-Sandboxing and policy plugins for [omp](https://github.com/anthropics/omp) (oh-my-pi coding agent).
+Sandboxing and policy plugins for omp (oh-my-pi coding agent).
 
 ## Filesystem sandbox for omp — two layers, one allowlist
 
@@ -22,7 +22,7 @@ Run **both**: the hook gives the model an actionable error and you a confirm dia
 
 ```bash
 # 1. Policy layer (one-time; applies to every omp session)
-omp plugin link ~/dev/omp-plugins/omp-fs-sandbox
+omp plugin install github:Daviey/omp-fs-sandbox
 
 # 2. Jail layer (per session, from the project dir)
 cd ~/dev/some-project

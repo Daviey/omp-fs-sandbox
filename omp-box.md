@@ -74,7 +74,9 @@ stays up. This is a **filesystem jail only** — see [Known limits](#known-limit
 `~/.ssh` is **read-only but readable** inside the jail. That means:
 
 - `git push` over ssh keeps working (agent uses your agent socket / keys to
-  authenticate to remotes) ✓
+  authenticate to remotes) ✓ — verified on this host: `ssh -T git@github.com`
+  authenticates inside the jail via the gpg-agent ssh socket, and
+  `git clone git@github.com:...` succeeds
 - **key theft-by-copy is possible**: the agent can `cat ~/.ssh/id_ed25519` and
   exfiltrate it over the still-open network. The jail stops *modification* of
   your home, not *reading* it.
