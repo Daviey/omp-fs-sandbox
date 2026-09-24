@@ -141,7 +141,7 @@ export default function fsSandbox(omp: HookAPI): void {
           // agent can never widen it from inside).
           const onceLabel = `Allow once (this session only) — ${resolved}`;
           const alwaysLabel = `Always allow (add ${parent} to allowlist)`;
-          const widenLabel = `Widen jail: run omp-box allow ${parent} host-side, then restart`;
+          const widenLabel = `Widen jail: omp-box allow ${parent}, then RESUME (conversation kept, no context loss)`;
           const choice = await ctx.ui.select("fs-sandbox", [
             onceLabel,
             alwaysLabel,
@@ -170,15 +170,18 @@ export default function fsSandbox(omp: HookAPI): void {
             // Persistent widening requires a human on the host: the jail's
             // mount table is built at launch, and ~/.config is read-only
             // inside, so the agent cannot write its own allowlist here.
+            // The cost is a RESUME, not a restart: `omp --resume` in the new
+            // jail continues THIS conversation with full context, so a
+            // long-running agent loses nothing but a few seconds of respawn.
             return {
               block: true,
               reason:
-                `fs-sandbox: jail widening approved for ${parent}, but it ` +
-                `must be applied host-side. The user should run, in a ` +
-                `NORMAL terminal (outside omp-box):\n` +
+                `fs-sandbox: widen requested for ${parent}. It must be ` +
+                `applied host-side (the mount table is launch-time and the ` +
+                `agent cannot write its own allowlist). In a NORMAL terminal:\n` +
                 `  omp-box allow ${parent}\n` +
-                `then restart this jailed session — the new mount set is ` +
-                `picked up at launch.`,
+                `  omp-box -- --resume   # resumes THIS conversation in the widened jail\n` +
+                `Context and session history carry over — nothing is lost.`,
             };
           }
           // Deny / dismissed falls through to the block below.
