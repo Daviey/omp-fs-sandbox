@@ -7,7 +7,7 @@ else under `$HOME` is bind-mounted **read-only at kernel mount level**: a stray
 `sed -i ~/important.conf`, `rm -rf ~/`, or `tee ~/.ssh/authorized_keys` from
 any subshell fails with `EROFS` (read-only filesystem), no matter which tool
 produced it. This is the backstop layer under the
-[`omp-fs-sandbox`](omp-fs-sandbox/) hook: the hook gives good UX, the jail
+[`omp-fs-sandbox`](https://github.com/Daviey/omp-fs-sandbox) hook: the hook gives good UX, the jail
 gives enforcement.
 
 ```bash
@@ -74,7 +74,7 @@ stays up. This is a **filesystem jail only** — see [Known limits](#known-limit
 `~/.ssh` is **read-only but readable** inside the jail. That means:
 
 - `git push` over ssh keeps working (agent uses your agent socket / keys to
-  authenticate to remotes) ✓ — verified on this host: `ssh -T git@github.com`
+  authenticate to remotes) ✓ — probe-verified: `ssh -T git@github.com`
   authenticates inside the jail via the gpg-agent ssh socket, and
   `git clone git@github.com:...` succeeds
 - **key theft-by-copy is possible**: the agent can `cat ~/.ssh/id_ed25519` and
@@ -98,12 +98,12 @@ user, in a NORMAL terminal: omp-box allow /X
 agent restarts the session (allowlist is launch-time)
 ```
 
-Contrast with the [`omp-fs-sandbox`](omp-fs-sandbox/) hook layer:
+Contrast with the `omp-fs-sandbox` hook layer (same repo, see PLUGIN-README.md):
 
 | | `omp-fs-sandbox` hook | `omp-box` jail |
 |---|---|---|
 | layer | omp tool-call interception | kernel mount namespace (firejail) |
-| catches | `write`/`edit`/`read` tool calls | **everything**: bash `sed`/`tee`/`rm`, subagents, spawned binaries |
+| catches | `write`/`edit`/`ast_edit` tool calls | **everything**: bash `sed`/`tee`/`rm`, subagents, spawned binaries |
 | UX | runtime confirm prompt, friendly errors, allowlist update in-session | hard `EROFS` / `Read-only file system` failures |
 | allowlist writable | yes (hook may update it, then confirms) | **no** — `~/.config` is ro inside; host-side `omp-box allow` only |
 | bypassable | by any shell escape (`bash -c 'echo > ~/f'`) | only by firejail/kernel compromise |
@@ -131,22 +131,22 @@ servers, watchers all die with it. If you want a server to persist, run it
 outside the jail (or in a separate `omp-box raw` invocation) and allowlist
 its data directory.
 
-## ZFS pairing (this host's layout)
+## ZFS pairing (optional, for snapshot/rollback users)
 
 Blast-radius reduction composes with snapshots. Put each project on its own
 dataset so a bad session can only damage one:
 
 ```bash
-zfs create rpool/home/dave/dev/omp-plugins      # one dataset per project
-zfs snapshot rpool/home/dave/dev/omp-plugins@pre-omp   # before a risky session
+zfs create <pool>/<fs>/dev/<proj>      # one dataset per project
+zfs snapshot <pool>/<fs>/dev/<proj>@pre-omp   # before a risky session
 # …incident happens…
-zfs rollback rpool/home/dave/dev/omp-plugins@pre-omp   # undo it, minutes not hours
+zfs rollback <pool>/<fs>/dev/<proj>@pre-omp   # undo it, minutes not hours
 ```
 
 The jail's RW set *is* the dataset: workspace rw, everything else ro, so a
 runaway write storm is bounded by the dataset — and `zfs rollback` restores it
 to the pre-session snapshot regardless of what the agent did inside. Snapshots
-are cheap (`zfs list -t snapshot -r rpool/home/dave/dev`), so snapshot
+are cheap (`zfs list -t snapshot -r <pool>/<fs>/dev`), so snapshot
 liberally before long autonomous runs (`zfs destroy` the ones that turned out
 fine). Note what ZFS does and doesn't give you: **rollback safety, not
 per-process confinement** — it protects `$PWD` after the fact; it does

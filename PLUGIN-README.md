@@ -23,7 +23,7 @@ member forms (`foo.zip:inner`, `db.sqlite:table`) are judged on the part before 
 | Resolves to cwd or under cwd                      | Allow                                                     |
 | Under an allowlist prefix (`~/.config/omp-sandbox/allowlist`) | Allow                                          |
 | Approved earlier this session                     | Allow                                                     |
-| Outside, UI session                               | Confirm dialog → approve: allow for session + best-effort append to allowlist; deny: block |
+| Outside, UI session                               | 3-way dialog: **Allow once** (session-only, not persisted) / **Always allow** (parent dir appended to allowlist, survives restarts — best-effort; silently session-only under the omp-box jail where `~/.config` is ro) / **Deny** (block) |
 | Outside, headless (print/subagent)                | Block with an actionable reason naming the path and the allowlist file |
 
 Any internal error in the hook **allows** the call (fail-open): this is a guardrail,
@@ -32,7 +32,10 @@ not a safety jail.
 ## Install
 
 ```sh
-omp plugin link /home/dave/dev/omp-plugins/omp-fs-sandbox
+# from GitHub:
+omp plugin install github:Daviey/omp-fs-sandbox
+# or, from a local clone of this repo:
+omp plugin link /path/to/omp-fs-sandbox
 omp plugin list   # should show omp-fs-sandbox
 ```
 
@@ -45,7 +48,8 @@ ships a default file containing `/tmp`; add paths like:
 
 ```
 /tmp
-/home/dave/dev/some-shared-tree
+/srv/shared-tree        # any absolute prefix (dir or file)
+~/projects/scratch      # ~ is expanded
 ```
 
 ## Escape hatch
